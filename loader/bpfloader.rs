@@ -49,6 +49,7 @@ const fn kver(a: u32, b: u32, c: u32) -> u32 {
 }
 
 const KVER_NONE: u32 = kver(0, 0, 0);
+const KVER_5_8: u32 = kver(5, 8, 0);
 const KVER_6_1: u32 = kver(6, 1, 0);
 const KVER_INF: u32 = 0xFFFFFFFF;
 
@@ -207,6 +208,8 @@ struct BpfFileDesc {
     skip_on_user: bool,
     // If this is true, the file is allowed to be missing.
     allow_missing: bool,
+    // The whole object is skipped if kernel_version() < min_kver.
+    min_kver: u32,
     maps: &'static [MapDesc],
     progs: &'static [ProgDesc],
 }
@@ -230,6 +233,7 @@ const BPF_FILE_DESC_DEFAULT: BpfFileDesc = BpfFileDesc {
     critical: false,
     skip_on_user: false,
     allow_missing: false,
+    min_kver: KVER_NONE,
     maps: &[],
     progs: &[],
 };
@@ -332,6 +336,11 @@ const FILE_ARR: &[BpfFileDesc] = &[
         filename: "/system/etc/bpf/bpfRingbufProg.bpf",
         critical: true,
         skip_on_user: true,
+        // BPF_MAP_TYPE_RINGBUF needs 5.8+; loading it on 4.9 fails
+        // with EINVAL and, being critical, aborts bpfloader before it re-execs
+        // netbpfload, so bpf.progs_loaded is never set and waitForProgsLoaded()
+        // users (health HAL) hang forever.
+        min_kver: KVER_5_8,
         maps: &[MapDesc::new(GID_ROOT, PERM_GRW, "test_ringbuf")],
         progs: &[ProgDesc::new(GID_ROOT, "skfilter_ringbuf_test")],
         ..BPF_FILE_DESC_DEFAULT
@@ -562,6 +571,10 @@ fn libbpf_worker(file_desc: &BpfFileDesc) -> Result<(), anyhow::Error> {
     info!("Loading {}", file_desc.filename);
     if file_desc.skip_on_user && is_user_build()? {
         info!("Skip loading {} on user build", file_desc.filename);
+        return Ok(());
+    }
+    if kernel_version()? < file_desc.min_kver {
+        info!("Skip loading {} on kernel older than {:x}", file_desc.filename, file_desc.min_kver);
         return Ok(());
     }
     let filepath = Path::new(file_desc.filename);
